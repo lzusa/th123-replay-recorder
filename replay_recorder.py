@@ -1628,15 +1628,16 @@ def _sanitize_name(name: str, fallback: str) -> str:
 def _build_session_dir(game_info: Dict[str, Any], output_dir: str,
                         real_host_name: str = None, real_client_name: str = None) -> str:
     """Build a session directory for a persistent game session.
-    Format: {host_name}-{client_name}_{ip}_{port}
+    Format: {date}_{host_name}({host_country})-{client_name}({client_country})
     Uses real names from INIT_SUCCESS packet if available, otherwise falls back to API names.
     """
     # Prefer real names from packet, fallback to API names
     host_name = _sanitize_name(real_host_name or game_info.get("host_name", "host"), "host")
     client_name = _sanitize_name(real_client_name or game_info.get("client_name", "client"), "client")
-    ip_port = game_info.get("ip", "unknown")
-    safe_ip_port = ip_port.replace(":", "_").replace(".", "_")
-    dir_name = f"{host_name}-{client_name}_{safe_ip_port}"
+    host_country = game_info.get("host_country", "")
+    client_country = game_info.get("client_country", "")
+    date_str = datetime.now().strftime("%y%m%d")
+    dir_name = f"{date_str}_{host_name}({host_country})-{client_name}({client_country})"
     return os.path.join(output_dir, dir_name)
 
 
