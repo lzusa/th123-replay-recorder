@@ -595,9 +595,7 @@ _last_status_lines = 0
 def print_status_display():
     """Print a multi-line live status display showing all active captures."""
     global _last_status_lines
-    # Move cursor up to clear previous display
-    if _last_status_lines > 0:
-        sys.stdout.write(f"\033[{_last_status_lines}A")
+    # Build new output lines
     lines: List[str] = []
     lines.append(stats.get_status_line())
     active = stats.get_active_games_snapshot()
@@ -612,10 +610,21 @@ def print_status_display():
             )
     else:
         lines.append("No active captures")
-    # Clear each line before printing to avoid leftover text
+
+    # Move cursor up to clear previous display
+    if _last_status_lines > 0:
+        sys.stdout.write(f"\033[{_last_status_lines}A")
+
+    # Clear each line and print new content
+    # Use max of old and new line count to ensure we clear all previous content
+    max_lines = max(_last_status_lines, len(lines))
     output = ""
-    for line in lines:
-        output += f"\033[K{line}\n"
+    for i in range(max_lines):
+        if i < len(lines):
+            output += f"\033[K{lines[i]}\n"
+        else:
+            # Clear remaining old lines that are no longer needed
+            output += "\033[K\n"
     sys.stdout.write(output)
     sys.stdout.flush()
     _last_status_lines = len(lines)
