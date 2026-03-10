@@ -162,8 +162,8 @@ class ServiceStats:
         with self.lock:
             active_games = len(self.current_games)
             return (
-                f"[Recorded: {self.recorded} | Active: {active_games} | "
-                f"Scanned: {self.total} | Skipped: {self.skipped} | Errors: {self.errors}]"
+                f"[已录制: {self.recorded} | 活跃: {active_games} | "
+                f"已扫描: {self.total} | 跳过: {self.skipped} | 错误: {self.errors}]"
             )
 
     def set_game_status(self, ip: str, status: str):
@@ -989,7 +989,7 @@ class SpectatorClient:
                                 logger.info(
                                     f"[{self.ip_port}] Match switched {active_match_id} -> {match_data.match_id}, stopping capture"
                                 )
-                                # Keep old match_data - frames belong to the previous match.
+                                # Keep old match_data — frames belong to the previous match.
                                 self.replay_data.ended = True
                                 stop_reason = "match_switch"
                                 break
@@ -1061,7 +1061,7 @@ class SpectatorClient:
                                 while (contiguous_word_frontier + 1) in raw_words_seen:
                                     contiguous_word_frontier += 1
 
-                                # Official client strategy: requested_frame = max(requested_frame, reply.frame_id)
+                                # 官方客户端策略: requested_frame = max(requested_frame, reply.frame_id)
                                 if sent_initial_probe and raw_frame_id > requested_frame:
                                     logger.debug(
                                         f"[{self.ip_port}] requested_frame {requested_frame} -> {raw_frame_id} "
@@ -1153,6 +1153,15 @@ class SpectatorClient:
                                 )
                             ):
                                 missing_now = _missing_frames_upto(current_max_frame)
+                                # if missing_now:
+                                #     logger.warning(
+                                #         f"[{self.ip_port}] Missing frame inputs up to {current_max_frame}: "
+                                #         f"count={len(missing_now)} ranges={_format_missing_ranges(missing_now)}"
+                                #     )
+                                # else:
+                                #     logger.debug(
+                                #         f"[{self.ip_port}] No missing frame inputs up to {current_max_frame}"
+                                #     )
                                 last_missing_report_time = current_time
                                 last_missing_report_max_frame = current_max_frame
 
@@ -1319,9 +1328,24 @@ class SpectatorClient:
             f"last_replay_frame={last_replay_frame_seen}, requested_frame={requested_frame}, match_id={current_match_id}"
         )
         final_max_frame = _max_captured_frame()
+        final_missing = _missing_frames_upto(final_max_frame)
+        # if final_missing:
+        #     logger.warning(
+        #         f"[{self.ip_port}] Final missing frame inputs up to {final_max_frame}: "
+        #         f"count={len(final_missing)} ranges={_format_missing_ranges(final_missing, max_ranges=64)}"
+        #     )
+        # else:
+        #     logger.info(f"[{self.ip_port}] Final missing frame inputs: none (up to {final_max_frame})")
 
         if self.replay_data.end_frame > 0:
             missing_to_end = _missing_frames_upto(self.replay_data.end_frame)
+            # if missing_to_end:
+            #     logger.warning(
+            #         f"[{self.ip_port}] Missing frame inputs up to end_frame={self.replay_data.end_frame}: "
+            #         f"count={len(missing_to_end)} ranges={_format_missing_ranges(missing_to_end, max_ranges=64)}"
+            #     )
+            # else:
+            #     logger.info(f"[{self.ip_port}] No missing frame inputs up to end_frame={self.replay_data.end_frame}")
 
         if dump_fh:
             try:
@@ -1525,7 +1549,7 @@ def _build_replay_filename(replay: ReplayData, game_info: Dict[str, Any]) -> str
     return f"{timestamp}_{host_name}({h_char})-{client_name}({c_char}).rep"
 
 
-def process_single_game(game_info: Dict, output_dir: str, duration: float, recorded_games: Set[str]) -> str:
+def process_single_game(game_info: Dict, output_dir: str, duration: float) -> str:
     """Process a single game: connect, capture all matches until disconnect, save each match."""
     ip_port = game_info.get("ip", "")
     if ":" not in ip_port:
@@ -1539,12 +1563,8 @@ def process_single_game(game_info: Dict, output_dir: str, duration: float, recor
         log_error("Invalid port number", e, {"port_str": port_str, "ip_port": ip_port})
         return "error"
 
-    # Check duplicate
+    # Generate game ID for logging purposes
     game_id = f"{game_info.get('host_name', '')}_{game_info.get('client_name', '')}_{ip_port}"
-    if game_id in recorded_games:
-        logger.info(f"Already recorded: {game_id}")
-        stats.update(skipped=stats.skipped + 1)
-        return "skipped"
 
     logger.info(f"[{ip_port}] Connecting...")
     # Register active game with detailed info for display
@@ -1614,7 +1634,7 @@ def process_single_game(game_info: Dict, output_dir: str, duration: float, recor
             else:
                 logger.warning(f"[{ip_port}] Match capture returned 0 frames (reason={replay.debug_stop_reason})")
 
-            # Continue looping only on match_switch - the session is still alive
+            # Continue looping only on match_switch — the session is still alive
             if replay.debug_stop_reason == "match_switch":
                 logger.info(f"[{ip_port}] Match ended, waiting for next match...")
                 stats.set_game_status(ip_port, "waiting next match...")
@@ -1636,7 +1656,6 @@ def process_single_game(game_info: Dict, output_dir: str, duration: float, recor
         stats.remove_game(ip_port)
 
     if saved_count > 0:
-        recorded_games.add(game_id)
         return "recorded"
     else:
         stats.update(errors=stats.errors + 1)
@@ -1652,42 +1671,11 @@ class ReplayService:
         self.poll_interval = poll_interval
         self.capture_duration = capture_duration
         self.max_workers = max_workers
-
-        self.recorded_games: Set[str] = set()
         self.running = False
-        self.lock = threading.Lock()
-
-        # Load recorded games from file
-        self.recorded_file = os.path.join(output_dir, "recorded_games.txt")
-        self._load_recorded_games()
 
         # Enable debug logging if needed
         if os.environ.get("REPLAY_DEBUG"):
             logging.getLogger().setLevel(logging.DEBUG)
-
-    def _load_recorded_games(self):
-        """Load the list of previously recorded games"""
-        if os.path.exists(self.recorded_file):
-            try:
-                with open(self.recorded_file, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        game_id = line.strip()
-                        if game_id:
-                            self.recorded_games.add(game_id)
-                logger.info(f"Loaded {len(self.recorded_games)} recorded games")
-            except Exception as e:
-                log_error("Failed to load recorded games", e, {"recorded_file": self.recorded_file})
-
-    def _save_recorded_game(self, game_id: str):
-        """Save a game ID to the recorded list"""
-        with self.lock:
-            self.recorded_games.add(game_id)
-        try:
-            os.makedirs(self.output_dir, exist_ok=True)
-            with open(self.recorded_file, 'a', encoding='utf-8') as f:
-                f.write(f"{game_id}\n")
-        except Exception as e:
-            log_error("Failed to save recorded game", e, {"game_id": game_id, "recorded_file": self.recorded_file})
 
     def get_spectatable_games(self) -> List[Dict[str, Any]]:
         """Get list of spectatable games"""
@@ -1707,25 +1695,27 @@ class ReplayService:
         stats.update(total=stats.total + len(games))
         logger.info(f"Processing {len(games)} spectatable games...")
 
+        # Track games submitted in this cycle to avoid duplicates within same poll
+        submitted_games = set()
+
         # Process games in parallel
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = {}
             for game in games:
                 game_id = f"{game.get('host_name', '')}_{game.get('client_name', '')}_{game.get('ip', '')}"
 
-                # Skip if already recorded
-                if game_id in self.recorded_games:
-                    logger.info(f"Skipping already recorded game: {game_id}")
-                    stats.update(skipped=stats.skipped + 1)
+                # Skip if already submitted in this poll cycle
+                if game_id in submitted_games:
+                    logger.debug(f"Skipping duplicate game in this poll: {game_id}")
                     continue
 
+                submitted_games.add(game_id)
                 logger.info(f"Submitting game for capture: {game_id}")
                 future = executor.submit(
                     process_single_game,
                     game,
                     self.output_dir,
-                    self.capture_duration,
-                    self.recorded_games
+                    self.capture_duration
                 )
                 futures[future] = game_id
 
@@ -1746,7 +1736,7 @@ class ReplayService:
             display_thread = threading.Thread(target=_update_display, daemon=True)
             display_thread.start()
 
-            # Wait for all to complete and save recorded games
+            # Wait for all to complete
             completed = 0
             for future in as_completed(futures):
                 game_id = futures[future]
@@ -1754,8 +1744,6 @@ class ReplayService:
                 try:
                     result = future.result()
                     logger.info(f"Game {completed}/{len(futures)} completed: {game_id} -> {result}")
-                    if result == "recorded":
-                        self._save_recorded_game(game_id)
                 except Exception as e:
                     log_error(f"Error processing game {game_id}", e, {"game_id": game_id})
                     stats.update(errors=stats.errors + 1)
