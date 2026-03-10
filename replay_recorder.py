@@ -367,9 +367,17 @@ class TouhouProtocol:
             client_raw = data_blob[32:64]
             swr_disabled = struct.unpack("<I", data_blob[64:68])[0]
 
-            # Official clients use Shift-JIS compatible names.
-            host_name = host_raw.lstrip(b"\x00").split(b"\x00", 1)[0].decode("shift_jis", errors="ignore")
-            client_name = client_raw.lstrip(b"\x00").split(b"\x00", 1)[0].decode("shift_jis", errors="ignore")
+            # Try GBK first (Chinese players), fallback to Shift-JIS
+            host_bytes = host_raw.lstrip(b"\x00").split(b"\x00", 1)[0]
+            client_bytes = client_raw.lstrip(b"\x00").split(b"\x00", 1)[0]
+            try:
+                host_name = host_bytes.decode("gbk", errors="strict")
+            except UnicodeDecodeError:
+                host_name = host_bytes.decode("shift_jis", errors="ignore")
+            try:
+                client_name = client_bytes.decode("gbk", errors="strict")
+            except UnicodeDecodeError:
+                client_name = client_bytes.decode("shift_jis", errors="ignore")
 
             result["host_name"] = host_name
             result["client_name"] = client_name
