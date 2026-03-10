@@ -367,17 +367,36 @@ class TouhouProtocol:
             client_raw = data_blob[32:64]
             swr_disabled = struct.unpack("<I", data_blob[64:68])[0]
 
-            # Try GBK first (Chinese players), fallback to Shift-JIS
+            # Try to decode player names
+            # Japanese clients use Shift-JIS, Chinese clients may use GBK
+            # We detect by checking if decoded GBK contains unexpected CJK characters in English names
             host_bytes = host_raw.lstrip(b"\x00").split(b"\x00", 1)[0]
             client_bytes = client_raw.lstrip(b"\x00").split(b"\x00", 1)[0]
-            try:
-                host_name = host_bytes.decode("gbk", errors="strict")
-            except UnicodeDecodeError:
-                host_name = host_bytes.decode("shift_jis", errors="ignore")
-            try:
-                client_name = client_bytes.decode("gbk", errors="strict")
-            except UnicodeDecodeError:
-                client_name = client_bytes.decode("shift_jis", errors="ignore")
+
+            def _decode_name(name_bytes: bytes) -> str:
+                """Decode name bytes, preferring Shift-JIS for ASCII-like content"""
+                if not name_bytes:
+                    return ""
+                # Try Shift-JIS first (works for both English and Japanese)
+                try:
+                    name_sjis = name_bytes.decode("shift_jis", errors="strict")
+                    # If it's mostly ASCII, Shift-JIS is correct
+                    ascii_chars = sum(1 for c in name_sjis if ord(c) < 128)
+                    if ascii_chars == len(name_sjis) or ascii_chars >= len(name_sjis) * 0.8:
+                        return name_sjis
+                except UnicodeDecodeError:
+                    pass
+                # Try GBK for Chinese names
+                try:
+                    name_gbk = name_bytes.decode("gbk", errors="strict")
+                    return name_gbk
+                except UnicodeDecodeError:
+                    pass
+                # Fallback to Shift-JIS with ignore
+                return name_bytes.decode("shift_jis", errors="ignore")
+
+            host_name = _decode_name(host_bytes)
+            client_name = _decode_name(client_bytes)
 
             result["host_name"] = host_name
             result["client_name"] = client_name
