@@ -1527,24 +1527,30 @@ def _sanitize_name(name: str, fallback: str) -> str:
     return safe[:20]
 
 
-def _build_session_dir(game_info: Dict[str, Any], output_dir: str) -> str:
+def _build_session_dir(game_info: Dict[str, Any], output_dir: str,
+                        real_host_name: str = None, real_client_name: str = None) -> str:
     """Build a session directory for a persistent game session.
     Format: {host_name}-{client_name}_{ip}_{port}
+    Uses real names from INIT_SUCCESS packet if available, otherwise falls back to API names.
     """
-    host_name = _sanitize_name(game_info.get("host_name", "host"), "host")
-    client_name = _sanitize_name(game_info.get("client_name", "client"), "client")
+    # Prefer real names from packet, fallback to API names
+    host_name = _sanitize_name(real_host_name or game_info.get("host_name", "host"), "host")
+    client_name = _sanitize_name(real_client_name or game_info.get("client_name", "client"), "client")
     ip_port = game_info.get("ip", "unknown")
     safe_ip_port = ip_port.replace(":", "_").replace(".", "_")
     dir_name = f"{host_name}-{client_name}_{safe_ip_port}"
     return os.path.join(output_dir, dir_name)
 
 
-def _build_replay_filename(replay: ReplayData, game_info: Dict[str, Any]) -> str:
+def _build_replay_filename(replay: ReplayData, game_info: Dict[str, Any],
+                           real_host_name: str = None, real_client_name: str = None) -> str:
     """Build filename like: 260308_214449_Bat(remilia)-蕾咪瞎玩(remilia).rep
     Character info comes from match_data (parsed from actual GAME_MATCH packet).
+    Uses real names from INIT_SUCCESS packet if available, otherwise falls back to API names.
     """
-    host_name = _sanitize_name(game_info.get("host_name", "host"), "host")
-    client_name = _sanitize_name(game_info.get("client_name", "client"), "client")
+    # Prefer real names from packet, fallback to API names
+    host_name = _sanitize_name(real_host_name or game_info.get("host_name", "host"), "host")
+    client_name = _sanitize_name(real_client_name or game_info.get("client_name", "client"), "client")
     timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
 
     # Prefer character from match_data (actual value from GAME_MATCH packet)
@@ -1602,8 +1608,26 @@ def process_single_game(game_info: Dict, output_dir: str, duration: float) -> st
         stats.remove_game(ip_port)
         return "error"
 
-    # Build session directory for this game session
-    session_dir = _build_session_dir(game_info, output_dir)
+    # Get real player names from INIT_SUCCESS packet
+    real_host_name = None
+    real_client_name = None
+    if client.init_success_info:
+        real_host_name = client.init_success_info.get("host_name")
+        real_client_name = client.init_success_info.get("client_name")
+        if real_host_name or real_client_name:
+            logger.info(f"[{ip_port}] Using real names from packet: host='{real_host_name}', client='{real_client_name}'")
+            # Update stats display with real names
+            stats.set_game_info(ip_port, ActiveGameInfo(
+                ip=ip_port,
+                host_name=real_host_name or game_info.get("host_name", "?"),
+                client_name=real_client_name or game_info.get("client_name", "?"),
+                host_char=h_char_api if h_char_api else "",
+                client_char=c_char_api if c_char_api else "",
+                status="connected",
+            ))
+
+    # Build session directory for this game session (using real names if available)
+    session_dir = _build_session_dir(game_info, output_dir, real_host_name, real_client_name)
     os.makedirs(session_dir, exist_ok=True)
 
     capture_duration = None if duration <= 0 else duration
@@ -1641,7 +1665,7 @@ def process_single_game(game_info: Dict, output_dir: str, duration: float) -> st
 
             # Save replay if we got frames
             if replay.frames:
-                filename = _build_replay_filename(replay, game_info)
+                filename = _build_replay_filename(replay, game_info, real_host_name, real_client_name)
                 filepath = os.path.join(session_dir, filename)
                 if save_replay_simple(replay, filepath):
                     saved_count += 1
