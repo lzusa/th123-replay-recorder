@@ -8,7 +8,9 @@ This tool connects to the Touhou 12.3 online server, discovers spectatable games
 
 ## Protocol Reference
 
-This implementation is based on the [Touhou 12.3 Protocol Documentation](https://github.com/delthas/touhou-protocol-docs) by delthas.
+This implementation is based on:
+- [Touhou 12.3 Protocol Documentation](https://github.com/delthas/touhou-protocol-docs) by delthas
+- [非想天则REP文件结构解析](https://rinkastone.com/2022/01/10/archives/109) by Rinkastone (石塔)
 
 ### Key Protocol Details
 
@@ -48,25 +50,25 @@ The Touhou 12.3 network protocol uses UDP datagrams with a tree topology:
 
 ## Replay File Format (.rep)
 
-The `.rep` file format follows the official Hisoutensoku 1.10 client format:
+The `.rep` file format follows the official Hisoutensoku 1.10 client format. This section is based on reverse engineering work by the community.
 
-### Header Structure (0x00 - 0x76)
+### Header Structure (0x00 - 0x78)
 
 ```
 Offset  Size    Description
 ------  ----    -----------
 0x00    2       Version marker (0xD2 0x00 for 1.10)
-0x02    4       Unknown/Reserved
+0x02    4       Unknown/Reserved (0x0004 may be a random seed related to Reisen/Yuyuko bullets)
 0x06    2       Unknown (0x03 0x09)
-0x08    1       Mode marker (0x06 for PvP)
-0x09    5       Unknown/Reserved
-0x0E    50      Host player data block
-0x40    50      Client player data block
-0x72    1       Unknown (0x03)
+0x08    1       Mode marker (0x06 for PvP network)
+0x09    5       Unknown/Reserved (observed as 00 00 01 03 00)
+0x0E    50      Host player data block (1P)
+0x40    50      Client player data block (2P)
+0x72    1       Unknown (observed as 0x03)
 0x73    1       Stage ID
 0x74    1       Music ID
 0x75    4       Random seed (uint32 LE)
-0x79    4       Game input count (uint32 LE)
+0x79    4       Game input count (uint32 LE) - determines replay duration
 ```
 
 ### Player Data Block Structure (50 bytes)
@@ -74,60 +76,88 @@ Offset  Size    Description
 ```
 Offset  Size    Description
 ------  ----    -----------
-0x00    1       Character ID
-0x01    1       Skin/Palette ID
-0x02    1       Deck ID (unused)
-0x03    1       Deck size (usually 20)
-0x04    40      Deck cards (20 x uint16 LE)
-0x2C    1       Side marker (0x00=host, 0x01=client)
-0x2D    1       Padding (0x00)
-0x2E    1       Disabled simultaneous buttons flag
+0x00    1       Character ID (0x00-0x13, see table below)
+0x01    1       Skin/Palette ID (0x00-0x07 normal, 0x08+ special colors)
+0x02    4       Deck card count (uint32 LE, usually 0x14 = 20 cards)
+0x06    40      Deck cards (20 x uint16 LE, card IDs)
+0x2E    1       Side marker (0x00=host/1P, 0x01=client/2P)
+0x2F    1       Unknown (observed as 0x01)
+0x30    1       Disabled simultaneous buttons flag (0x00 or 0x01)
 ```
 
-### Input Data (after header)
+**Note on offsets:** The player data blocks are at:
+- Host (1P): 0x0E - 0x3D
+- Client (2P): 0x3E - 0x6D
 
-Each frame consists of two 16-bit input words:
-- First word: Host player input
-- Second word: Client player input
+### Input Data (after header, offset 0x7D+)
 
-Input bit flags during battle:
-| Button | Binary | Hex |
-|--------|--------|-----|
-| A+B | 0b00000000 0b00000001 | 0x0001 |
-| B+C | 0b00000000 0b00000010 | 0x0002 |
-| Up | 0b00000001 0b00000000 | 0x0100 |
-| Down | 0b00000010 0b00000000 | 0x0200 |
-| Left | 0b00000100 0b00000000 | 0x0400 |
-| Right | 0b00001000 0b00000000 | 0x0800 |
-| A | 0b00010000 0b00000000 | 0x1000 |
-| B | 0b00100000 0b00000000 | 0x2000 |
-| C | 0b01000000 0b00000000 | 0x4000 |
-| Dash | 0b10000000 0b00000000 | 0x8000 |
+Each frame consists of two 16-bit input words (little-endian):
+- First word: Host (1P) player input
+- Second word: Client (2P) player input
+
+**Input bit flags during battle:**
+| Bit | Binary | Hex | Button |
+|-----|--------|-----|--------|
+| 0 | 0b00000000 0b00000001 | 0x0001 | A+B |
+| 1 | 0b00000000 0b00000010 | 0x0002 | B+C |
+| 8 | 0b00000001 0b00000000 | 0x0100 | Up |
+| 9 | 0b00000010 0b00000000 | 0x0200 | Down |
+| 10 | 0b00000100 0b00000000 | 0x0400 | Left |
+| 11 | 0b00001000 0b00000000 | 0x0800 | Right |
+| 12 | 0b00010000 0b00000000 | 0x1000 | A |
+| 13 | 0b00100000 0b00000000 | 0x2000 | B |
+| 14 | 0b01000000 0b00000000 | 0x4000 | C |
+| 15 | 0b10000000 0b00000000 | 0x8000 | Dash |
 
 ### Character IDs
 
-| ID | Character |
-|----|-----------|
-| 0x00 | Reimu |
-| 0x01 | Marisa |
-| 0x02 | Sakuya |
-| 0x03 | Alice |
-| 0x04 | Patchouli |
-| 0x05 | Youmu |
-| 0x06 | Remilia |
-| 0x07 | Yuyuko |
-| 0x08 | Yukari |
-| 0x09 | Suika |
-| 0x0A | Reisen |
-| 0x0B | Aya |
-| 0x0C | Komachi |
-| 0x0D | Iku |
-| 0x0E | Tenshi |
-| 0x0F | Sanae |
-| 0x10 | Cirno |
-| 0x11 | Meiling |
-| 0x12 | Utsuho |
-| 0x13 | Suwako |
+| ID | Character | Special Colors |
+|----|-----------|----------------|
+| 0x00 | Reimu | 1 |
+| 0x01 | Marisa | 1 |
+| 0x02 | Sakuya | 1 |
+| 0x03 | Alice | 1 |
+| 0x04 | Patchouli | 1 |
+| 0x05 | Youmu | 1 |
+| 0x06 | Remilia | 2 |
+| 0x07 | Yuyuko | 1 |
+| 0x08 | Yukari | 1 (null/black) |
+| 0x09 | Suika | 1 |
+| 0x0A | Reisen | 1 (null/black) |
+| 0x0B | Aya | 1 |
+| 0x0C | Komachi | 1 |
+| 0x0D | Iku | 2 |
+| 0x0E | Tenshi | 2 |
+| 0x0F | Sanae | 1 |
+| 0x10 | Cirno | 2 (null/black) |
+| 0x11 | Meiling | 3 |
+| 0x12 | Utsuho | 1 |
+| 0x13 | Suwako | 1 |
+
+### Stage IDs
+
+| ID | Stage |
+|----|-------|
+| 0x00 | Collapsed Hakurei Shrine |
+| 0x01 | Forest of Magic |
+| 0x02 | Genbu Ravine |
+| 0x03 | Youkai Mountain |
+| 0x04 | Unidentified Fantastic Object |
+| 0x05 | Bhava-agra |
+| 0x0A | Hakurei Shrine |
+| 0x0B | Kirisame Magic Shop |
+| 0x0C | Scarlet Devil Mansion Clock Tower |
+| 0x0D | Forest of Dolls |
+| 0x0E | Scarlet Devil Mansion Library |
+| 0x0F | Netherworld |
+| 0x10 | Scarlet Devil Mansion Lobby |
+| 0x11 | Hakugyokurou Snow Garden |
+| 0x12 | Bamboo Forest of the Lost |
+| 0x1E | Misty Lake |
+| 0x1F | Moriya Shrine |
+| 0x20 | Underground Geyser Center Entrance |
+| 0x21 | Underground Geyser Center Passage |
+| 0x22 | Fusion Reactor Core |
 
 ## Installation
 
@@ -227,6 +257,12 @@ Host -> Spectator: GAME_REPLAY (compressed inputs)
 Host -> Spectator: GAME_MATCH (match config when new match starts)
 ```
 
+## References
+
+- [Touhou 12.3 Protocol Documentation](https://github.com/delthas/touhou-protocol-docs) - Official protocol docs by delthas
+- [非想天则REP文件结构解析](https://rinkastone.com/2022/01/10/archives/109) - Detailed .rep file format analysis by Rinkastone
+- [Deck Extracting Wiki](https://hisouten.koumakan.jp/wiki/Deck_Extracting) - Card, character, stage, and BGM value tables
+
 ## License
 
 This project is provided as-is for educational and personal use. Please respect the Touhou 12.3 community guidelines when using this tool.
@@ -234,4 +270,5 @@ This project is provided as-is for educational and personal use. Please respect 
 ## Acknowledgments
 
 - Protocol documentation by [delthas](https://github.com/delthas/touhou-protocol-docs)
+- REP file format analysis by [Rinkastone](https://rinkastone.com/)
 - Touhou 12.3 (Hisoutensoku) by Twilight Frontier and Team Shanghai Alice
