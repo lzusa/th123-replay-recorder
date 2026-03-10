@@ -1527,19 +1527,14 @@ def _sanitize_name(name: str, fallback: str) -> str:
     return safe[:20]
 
 
-def _build_session_dir(game_info: Dict[str, Any], output_dir: str,
-                        real_host_name: str = None, real_client_name: str = None) -> str:
+def _build_session_dir(game_info: Dict[str, Any], output_dir: str) -> str:
     """Build a session directory for a persistent game session.
-    Format: {host_name}-{client_name}_{ip}_{port}
-    Uses real names from INIT_SUCCESS packet if available, otherwise falls back to API names.
+    Format: {ip}_{port}
+    Uses only IP:Port to ensure consistency regardless of player name changes.
     """
-    # Prefer real names from packet, fallback to API names
-    host_name = _sanitize_name(real_host_name or game_info.get("host_name", "host"), "host")
-    client_name = _sanitize_name(real_client_name or game_info.get("client_name", "client"), "client")
     ip_port = game_info.get("ip", "unknown")
     safe_ip_port = ip_port.replace(":", "_").replace(".", "_")
-    dir_name = f"{host_name}-{client_name}_{safe_ip_port}"
-    return os.path.join(output_dir, dir_name)
+    return os.path.join(output_dir, safe_ip_port)
 
 
 def _build_replay_filename(replay: ReplayData, game_info: Dict[str, Any],
@@ -1626,8 +1621,8 @@ def process_single_game(game_info: Dict, output_dir: str, duration: float) -> st
                 status="connected",
             ))
 
-    # Build session directory for this game session (using real names if available)
-    session_dir = _build_session_dir(game_info, output_dir, real_host_name, real_client_name)
+    # Build session directory for this game session (using only IP:Port for consistency)
+    session_dir = _build_session_dir(game_info, output_dir)
     os.makedirs(session_dir, exist_ok=True)
 
     capture_duration = None if duration <= 0 else duration
