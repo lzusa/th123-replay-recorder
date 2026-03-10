@@ -163,7 +163,7 @@ Each frame consists of two 16-bit input words (little-endian):
 
 ```bash
 # Clone or download the script
-git clone <repository-url>
+git clone git@github.com:lzusa/th123-replay-recorder.git
 cd th123-replay-recorder
 
 # No additional dependencies required (uses only Python standard library)
