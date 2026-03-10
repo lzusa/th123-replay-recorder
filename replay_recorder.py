@@ -602,7 +602,7 @@ _last_status_lines = 0
 
 def print_status_display():
     """Print a multi-line live status display showing all active captures.
-    Uses a simpler approach: clear screen and redraw everything.
+    Uses cursor movement to update in place, compatible with Windows Terminal.
     """
     global _last_status_lines
     # Build new output lines
@@ -624,11 +624,23 @@ def print_status_display():
     else:
         lines.append("No active captures")
 
-    # Clear screen and redraw (more reliable than cursor movement in tmux)
-    # \033[2J = clear entire screen, \033[H = move cursor to top-left
-    output = "\033[2J\033[H"
-    output += "\n".join(lines)
-    sys.stdout.write(output)
+    # Move cursor up to the start of previous display
+    if _last_status_lines > 0:
+        # \033[{n}A = move up n lines, then \r = return to start of line
+        sys.stdout.write(f"\033[{_last_status_lines}A")
+
+    # Print each line, clearing to end of line
+    for i, line in enumerate(lines):
+        if i > 0:
+            sys.stdout.write("\n")
+        # \r = return to start, \033[K = clear to end of line
+        sys.stdout.write(f"\r\033[K{line}")
+
+    # If previous display had more lines, clear the remaining ones
+    if _last_status_lines > len(lines):
+        for _ in range(_last_status_lines - len(lines)):
+            sys.stdout.write("\n\r\033[K")
+
     sys.stdout.flush()
     _last_status_lines = len(lines)
 
