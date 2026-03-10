@@ -601,7 +601,9 @@ _last_status_lines = 0
 
 
 def print_status_display():
-    """Print a multi-line live status display showing all active captures."""
+    """Print a multi-line live status display showing all active captures.
+    Uses a simpler approach: clear screen and redraw everything.
+    """
     global _last_status_lines
     # Build new output lines
     lines: List[str] = []
@@ -613,26 +615,19 @@ def print_status_display():
         for g in active:
             h_display = f"{g.host_name}({g.host_char})" if g.host_char else g.host_name
             c_display = f"{g.client_name}({g.client_char})" if g.client_char else g.client_name
+            # Truncate long names to prevent line overflow
+            h_display = (h_display[:17] + "...") if len(h_display) > 20 else h_display
+            c_display = (c_display[:17] + "...") if len(c_display) > 20 else c_display
             lines.append(
                 f"{g.ip:<24} {h_display:<20} {c_display:<20} {g.match_id:>5} {g.frame_count:>7} {g.saved_count:>5} {g.status}"
             )
     else:
         lines.append("No active captures")
 
-    # Move cursor up to clear previous display
-    if _last_status_lines > 0:
-        sys.stdout.write(f"\033[{_last_status_lines}A")
-
-    # Clear each line and print new content
-    # Use max of old and new line count to ensure we clear all previous content
-    max_lines = max(_last_status_lines, len(lines))
-    output = ""
-    for i in range(max_lines):
-        if i < len(lines):
-            output += f"\033[K{lines[i]}\n"
-        else:
-            # Clear remaining old lines that are no longer needed
-            output += "\033[K\n"
+    # Clear screen and redraw (more reliable than cursor movement in tmux)
+    # \033[2J = clear entire screen, \033[H = move cursor to top-left
+    output = "\033[2J\033[H"
+    output += "\n".join(lines)
     sys.stdout.write(output)
     sys.stdout.flush()
     _last_status_lines = len(lines)
