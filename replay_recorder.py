@@ -39,6 +39,7 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 
 LOG_FILE = os.path.join(LOGS_DIR, 'replay_service.log')
 ERROR_LOG_FILE = os.path.join(LOGS_DIR, 'error_details.log')
+INIT_SUCCESS_NAME_DEBUG_FILE = os.path.join(LOGS_DIR, 'init_success_name_debug.log')
 
 logging.basicConfig(
     level=log_level,
@@ -55,6 +56,24 @@ error_logger.setLevel(logging.ERROR)
 error_handler = logging.FileHandler(ERROR_LOG_FILE, encoding='utf-8')
 error_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 error_logger.addHandler(error_handler)
+
+# Always-on debug logger for INIT_SUCCESS profile name parsing.
+init_success_name_logger = logging.getLogger('init_success_name_debug')
+init_success_name_logger.setLevel(logging.INFO)
+init_success_name_logger.propagate = False
+if not init_success_name_logger.handlers:
+    init_success_name_handler = logging.FileHandler(INIT_SUCCESS_NAME_DEBUG_FILE, encoding='utf-8')
+    init_success_name_handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
+    init_success_name_logger.addHandler(init_success_name_handler)
+
+
+def log_init_success_name_debug(record: Dict[str, Any]):
+    """Write INIT_SUCCESS name parsing diagnostics to a dedicated file."""
+    try:
+        init_success_name_logger.info(json.dumps(record, ensure_ascii=False))
+    except Exception:
+        # Do not let debug logging affect replay capture flow.
+        pass
 
 
 def log_error(context: str, exception: Exception, extra_info: Dict[str, Any] = None):
@@ -360,17 +379,28 @@ class TouhouProtocol:
         data_blob = payload[data_offset:data_end]
         result["data_blob"] = data_blob
 
-        # First INIT_SUCCESS commonly contains:
-        # host_name_padded(32) + client_name_padded(32) + swr_disabled(4)
+        # INIT_SUCCESS data_first layout (per protocol):
+        #   host_profile(profile_name_padded:32) + client_profile(profile_name_padded:32) + swr_disabled(4)
+        # Each profile_name_padded (32 bytes):
+        #   byte 0: unknown field (not part of the name)
+        #   bytes 1-31: profile_name + 0x00 terminator + arbitrary padding
         if len(data_blob) >= 68:
             host_raw = data_blob[0:32]
             client_raw = data_blob[32:64]
             swr_disabled = struct.unpack("<I", data_blob[64:68])[0]
 
-            # Try to decode player names
-            # Japanese clients use Shift-JIS, Chinese clients may use GBK
-            host_bytes = host_raw.lstrip(b"\x00").split(b"\x00", 1)[0]
-            client_bytes = client_raw.lstrip(b"\x00").split(b"\x00", 1)[0]
+            def _extract_profile_name_bytes(padded: bytes) -> bytes:
+                """Extract profile name: skip byte 0, read null-terminated from byte 1."""
+                if len(padded) < 2:
+                    return b""
+                body = padded[1:]
+                nul_pos = body.find(b"\x00")
+                if nul_pos >= 0:
+                    return body[:nul_pos]
+                return body
+
+            host_bytes = _extract_profile_name_bytes(host_raw)
+            client_bytes = _extract_profile_name_bytes(client_raw)
 
             def _decode_name(name_bytes: bytes) -> str:
                 """Decode name bytes, detecting encoding based on content"""
@@ -380,8 +410,6 @@ class TouhouProtocol:
                 # Try GBK first for Chinese names
                 try:
                     name_gbk = name_bytes.decode("gbk", errors="strict")
-                    # Check if GBK result looks like valid Chinese/Japanese/Korean
-                    # GBK Chinese chars are in specific ranges
                     cjk_chars = sum(1 for c in name_gbk if '\u4e00' <= c <= '\u9fff' or '\u3000' <= c <= '\u303f')
                     if cjk_chars > 0:
                         return name_gbk
@@ -391,12 +419,11 @@ class TouhouProtocol:
                 # Try Shift-JIS for Japanese/English names
                 try:
                     name_sjis = name_bytes.decode("shift_jis", errors="strict")
-                    # Check for valid Shift-JIS content (ASCII, Hiragana, Katakana, or common Japanese)
                     valid_sjis = sum(1 for c in name_sjis
-                                     if ord(c) < 128 or  # ASCII
-                                        '\u3040' <= c <= '\u309f' or  # Hiragana
-                                        '\u30a0' <= c <= '\u30ff' or  # Katakana
-                                        '\u4e00' <= c <= '\u9fff')    # Kanji
+                                     if ord(c) < 128 or
+                                        '\u3040' <= c <= '\u309f' or
+                                        '\u30a0' <= c <= '\u30ff' or
+                                        '\u4e00' <= c <= '\u9fff')
                     if valid_sjis == len(name_sjis):
                         return name_sjis
                 except UnicodeDecodeError:
@@ -411,9 +438,33 @@ class TouhouProtocol:
             host_name = _decode_name(host_bytes)
             client_name = _decode_name(client_bytes)
 
+            log_init_success_name_debug({
+                "event": "parse_init_success_names",
+                "spectate_info": result["spectate_info"],
+                "data_size": result["data_size"],
+                "raw_len": result["raw_len"],
+                "host_raw_hex": host_raw.hex(),
+                "client_raw_hex": client_raw.hex(),
+                "host_byte0": f"0x{host_raw[0]:02x}",
+                "client_byte0": f"0x{client_raw[0]:02x}",
+                "host_name_bytes_hex": host_bytes.hex(),
+                "client_name_bytes_hex": client_bytes.hex(),
+                "host_name": host_name,
+                "client_name": client_name,
+                "swr_disabled": swr_disabled,
+            })
+
             result["host_name"] = host_name
             result["client_name"] = client_name
             result["swr_disabled"] = swr_disabled
+        else:
+            log_init_success_name_debug({
+                "event": "parse_init_success_short_data_blob",
+                "data_size": result.get("data_size", 0),
+                "raw_len": result.get("raw_len", 0),
+                "data_blob_len": len(data_blob),
+                "data_blob_hex": data_blob[:96].hex(),
+            })
 
         return result
 
