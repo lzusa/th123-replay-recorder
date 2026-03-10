@@ -617,7 +617,22 @@ class SpectatorClient:
 
                 time.sleep(0.016)
 
+        except Exception as e:
+            if not stop_reason:
+                stop_reason = "capture_exception"
+            log_error(
+                f"Unexpected capture error for {self.ip_port}",
+                e,
+                {
+                    "current_match_id": current_match_id,
+                    "requested_frame": requested_frame,
+                    "last_replay_frame_seen": last_replay_frame_seen,
+                    "captured_frames": len(frame_inputs_by_id),
+                },
+            )
+
         finally:
+            self.replay_data.frames = list(frame_inputs_by_id.values())
             if dump_fh:
                 try:
                     dump_fh.write(f"# stream dump end {datetime.now().isoformat()} {self.ip_port}\n")

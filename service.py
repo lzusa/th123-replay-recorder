@@ -81,11 +81,36 @@ def process_single_game(game_info: Dict[str, Any], output_dir: str, duration: fl
     os.makedirs(session_dir, exist_ok=True)
     stats.update_game_saved_count(ip_port, saved_count)
 
+    def persist_replay(replay: ReplayData, is_partial: bool = False) -> bool:
+        nonlocal saved_count
+
+        if not replay.frames:
+            return False
+
+        filename = build_replay_filename(replay, game_info, real_host_name, real_client_name)
+        filepath = os.path.join(session_dir, filename)
+        if save_replay_simple(replay, filepath):
+            saved_count += 1
+            stats.update(recorded=stats.recorded + 1)
+            stats.update_game_saved_count(ip_port, saved_count)
+            replay_kind = "partial replay" if is_partial else "replay"
+            logger.info(
+                f"[{ip_port}] Saved {replay_kind} #{saved_count}: {filepath} "
+                f"({len(replay.frames)} frames, reason={replay.debug_stop_reason})"
+            )
+            return True
+
+        logger.error(f"[{ip_port}] Failed to save replay to {filepath}")
+        stats.update(errors=stats.errors + 1)
+        return False
+
     try:
+        replay_saved_for_current_capture = False
         while True:
             logger.info(f"[{ip_port}] Capturing match (timeout={duration}s)...")
             stats.set_game_status(ip_port, "capturing...")
             client.replay_data = ReplayData()
+            replay_saved_for_current_capture = False
 
             replay = client.capture_replay(
                 duration=capture_duration,
@@ -104,16 +129,7 @@ def process_single_game(game_info: Dict[str, Any], output_dir: str, duration: fl
             )
 
             if replay.frames:
-                filename = build_replay_filename(replay, game_info, real_host_name, real_client_name)
-                filepath = os.path.join(session_dir, filename)
-                if save_replay_simple(replay, filepath):
-                    saved_count += 1
-                    stats.update(recorded=stats.recorded + 1)
-                    stats.update_game_saved_count(ip_port, saved_count)
-                    logger.info(f"[{ip_port}] Saved match #{saved_count}: {filepath} ({len(replay.frames)} frames)")
-                else:
-                    logger.error(f"[{ip_port}] Failed to save replay to {filepath}")
-                    stats.update(errors=stats.errors + 1)
+                replay_saved_for_current_capture = persist_replay(replay)
             else:
                 logger.warning(f"[{ip_port}] Match capture returned 0 frames (reason={replay.debug_stop_reason})")
 
@@ -126,6 +142,12 @@ def process_single_game(game_info: Dict[str, Any], output_dir: str, duration: fl
             break
 
     except Exception as e:
+        if not replay_saved_for_current_capture and client.replay_data.frames:
+            logger.info(
+                f"[{ip_port}] Capture failed after receiving frames, attempting to save partial replay "
+                f"(reason={client.replay_data.debug_stop_reason or 'exception'})"
+            )
+            replay_saved_for_current_capture = persist_replay(client.replay_data, is_partial=True)
         log_error(
             f"Unexpected error during capture for {ip_port}",
             e,
