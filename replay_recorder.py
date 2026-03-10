@@ -1527,14 +1527,19 @@ def _sanitize_name(name: str, fallback: str) -> str:
     return safe[:20]
 
 
-def _build_session_dir(game_info: Dict[str, Any], output_dir: str) -> str:
+def _build_session_dir(game_info: Dict[str, Any], output_dir: str,
+                        real_host_name: str = None, real_client_name: str = None) -> str:
     """Build a session directory for a persistent game session.
-    Format: {ip}_{port}
-    Uses only IP:Port to ensure consistency regardless of player name changes.
+    Format: {host_name}-{client_name}_{ip}_{port}
+    Uses real names from INIT_SUCCESS packet if available, otherwise falls back to API names.
     """
+    # Prefer real names from packet, fallback to API names
+    host_name = _sanitize_name(real_host_name or game_info.get("host_name", "host"), "host")
+    client_name = _sanitize_name(real_client_name or game_info.get("client_name", "client"), "client")
     ip_port = game_info.get("ip", "unknown")
     safe_ip_port = ip_port.replace(":", "_").replace(".", "_")
-    return os.path.join(output_dir, safe_ip_port)
+    dir_name = f"{host_name}-{client_name}_{safe_ip_port}"
+    return os.path.join(output_dir, dir_name)
 
 
 def _build_replay_filename(replay: ReplayData, game_info: Dict[str, Any],
@@ -1621,16 +1626,20 @@ def process_single_game(game_info: Dict, output_dir: str, duration: float) -> st
                 status="connected",
             ))
 
-    # Build session directory for this game session (using only IP:Port for consistency)
-    session_dir = _build_session_dir(game_info, output_dir)
-    os.makedirs(session_dir, exist_ok=True)
+    # Build session directory for this game session (using real names if available)
+    session_dir = _build_session_dir(game_info, output_dir, real_host_name, real_client_name)
 
     capture_duration = None if duration <= 0 else duration
     # Count existing replays in session directory for TODAY only
     # to avoid counting files from previous days when same players reconnect
-    today_str = datetime.now().strftime("%y%m%d")
-    existing_replays = glob.glob(os.path.join(session_dir, f"{today_str}_*.rep"))
-    saved_count = len(existing_replays)
+    # Only count if directory already exists (i.e., reconnecting to same session)
+    saved_count = 0
+    if os.path.exists(session_dir):
+        today_str = datetime.now().strftime("%y%m%d")
+        existing_replays = glob.glob(os.path.join(session_dir, f"{today_str}_*.rep"))
+        saved_count = len(existing_replays)
+    # Create directory after checking existence
+    os.makedirs(session_dir, exist_ok=True)
     # Also update the stats display with the initial count
     stats.update_game_saved_count(ip_port, saved_count)
 
