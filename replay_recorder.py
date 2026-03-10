@@ -369,31 +369,44 @@ class TouhouProtocol:
 
             # Try to decode player names
             # Japanese clients use Shift-JIS, Chinese clients may use GBK
-            # We detect by checking if decoded GBK contains unexpected CJK characters in English names
             host_bytes = host_raw.lstrip(b"\x00").split(b"\x00", 1)[0]
             client_bytes = client_raw.lstrip(b"\x00").split(b"\x00", 1)[0]
 
             def _decode_name(name_bytes: bytes) -> str:
-                """Decode name bytes, preferring Shift-JIS for ASCII-like content"""
+                """Decode name bytes, detecting encoding based on content"""
                 if not name_bytes:
                     return ""
-                # Try Shift-JIS first (works for both English and Japanese)
+
+                # Try GBK first for Chinese names
+                try:
+                    name_gbk = name_bytes.decode("gbk", errors="strict")
+                    # Check if GBK result looks like valid Chinese/Japanese/Korean
+                    # GBK Chinese chars are in specific ranges
+                    cjk_chars = sum(1 for c in name_gbk if '\u4e00' <= c <= '\u9fff' or '\u3000' <= c <= '\u303f')
+                    if cjk_chars > 0:
+                        return name_gbk
+                except UnicodeDecodeError:
+                    pass
+
+                # Try Shift-JIS for Japanese/English names
                 try:
                     name_sjis = name_bytes.decode("shift_jis", errors="strict")
-                    # If it's mostly ASCII, Shift-JIS is correct
-                    ascii_chars = sum(1 for c in name_sjis if ord(c) < 128)
-                    if ascii_chars == len(name_sjis) or ascii_chars >= len(name_sjis) * 0.8:
+                    # Check for valid Shift-JIS content (ASCII, Hiragana, Katakana, or common Japanese)
+                    valid_sjis = sum(1 for c in name_sjis
+                                     if ord(c) < 128 or  # ASCII
+                                        '\u3040' <= c <= '\u309f' or  # Hiragana
+                                        '\u30a0' <= c <= '\u30ff' or  # Katakana
+                                        '\u4e00' <= c <= '\u9fff')    # Kanji
+                    if valid_sjis == len(name_sjis):
                         return name_sjis
                 except UnicodeDecodeError:
                     pass
-                # Try GBK for Chinese names
+
+                # Fallback: try GBK with replace, then Shift-JIS
                 try:
-                    name_gbk = name_bytes.decode("gbk", errors="strict")
-                    return name_gbk
-                except UnicodeDecodeError:
-                    pass
-                # Fallback to Shift-JIS with ignore
-                return name_bytes.decode("shift_jis", errors="ignore")
+                    return name_bytes.decode("gbk", errors="replace")
+                except:
+                    return name_bytes.decode("shift_jis", errors="ignore")
 
             host_name = _decode_name(host_bytes)
             client_name = _decode_name(client_bytes)
