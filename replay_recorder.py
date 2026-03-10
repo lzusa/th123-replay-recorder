@@ -18,6 +18,7 @@ import logging
 import threading
 import signal
 import traceback
+import glob
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Set
 from datetime import datetime
@@ -1597,7 +1598,12 @@ def process_single_game(game_info: Dict, output_dir: str, duration: float) -> st
     os.makedirs(session_dir, exist_ok=True)
 
     capture_duration = None if duration <= 0 else duration
-    saved_count = 0
+    # Count existing replays in session directory to get accurate saved_count
+    # (in case this is a reconnection to an ongoing session)
+    existing_replays = glob.glob(os.path.join(session_dir, "*.rep"))
+    saved_count = len(existing_replays)
+    # Also update the stats display with the initial count
+    stats.update_game_saved_count(ip_port, saved_count)
 
     try:
         while True:
