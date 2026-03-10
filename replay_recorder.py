@@ -18,12 +18,11 @@ import logging
 import threading
 import signal
 import traceback
-import multiprocessing as mp
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Set
 from datetime import datetime
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Set UTF-8 output for Windows
 if sys.platform == 'win32':
@@ -1499,6 +1498,10 @@ def fetch_games() -> List[Dict[str, Any]]:
         import urllib.request
         req = urllib.request.Request(GAMES_URL)
         req.add_header('User-Agent', 'Mozilla/5.0')
+        # Prevent caching - always get fresh data
+        req.add_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        req.add_header('Pragma', 'no-cache')
+        req.add_header('Expires', '0')
         with urllib.request.urlopen(req, timeout=10) as response:
             data = response.read()
             games = json.loads(data)
@@ -1664,18 +1667,18 @@ def process_single_game(game_info: Dict, output_dir: str, duration: float) -> st
 
 
 class ReplayService:
-    """Replay recording service with multi-process support"""
+    """Replay recording service with continuous polling and dynamic game discovery"""
 
     def __init__(self, output_dir: str = DEFAULT_OUTPUT_DIR, poll_interval: float = 30.0,
-                 capture_duration: float = 120.0, max_workers: int = 10,
-                 num_cores: int = 1, workers_per_core: int = 15):
+                 capture_duration: float = 120.0, max_workers: int = 30):
         self.output_dir = output_dir
         self.poll_interval = poll_interval
         self.capture_duration = capture_duration
         self.max_workers = max_workers
-        self.num_cores = num_cores
-        self.workers_per_core = workers_per_core
         self.running = False
+        self.active_futures = {}  # game_id -> future
+        self.executor = None
+        self.lock = threading.Lock()
 
         # Enable debug logging if needed
         if os.environ.get("REPLAY_DEBUG"):
@@ -1688,120 +1691,122 @@ class ReplayService:
         logger.debug(f"Found {len(spectatable)} spectatable games out of {len(games)} total")
         return spectatable
 
-    def run_once(self):
-        """Run one capture cycle using multi-process architecture"""
+    def _game_capture_callback(self, game_id: str, future):
+        """Callback when a game capture task completes"""
+        try:
+            result = future.result()
+            logger.info(f"Game completed: {game_id} -> {result}")
+        except Exception as e:
+            log_error(f"Error processing game {game_id}", e, {"game_id": game_id})
+            stats.update(errors=stats.errors + 1)
+        finally:
+            with self.lock:
+                if game_id in self.active_futures:
+                    del self.active_futures[game_id]
+
+    def poll_and_submit_new_games(self):
+        """Fetch games and submit new ones without waiting"""
         logger.info("Fetching games from server...")
         games = self.get_spectatable_games()
         if not games:
-            logger.info("No spectatable games found")
-            return
+            logger.debug("No spectatable games found")
+            return 0
 
         stats.update(total=stats.total + len(games))
-        logger.info(f"Processing {len(games)} spectatable games...")
 
-        # Track games submitted in this cycle to avoid duplicates
-        submitted_games = set()
-        unique_games = []
+        submitted_count = 0
         for game in games:
             game_id = f"{game.get('host_name', '')}_{game.get('client_name', '')}_{game.get('ip', '')}"
-            if game_id not in submitted_games:
-                submitted_games.add(game_id)
-                unique_games.append(game)
 
-        if not unique_games:
-            logger.info("No new games to process")
-            return
+            with self.lock:
+                # Skip if already being processed
+                if game_id in self.active_futures:
+                    logger.debug(f"Game already being processed: {game_id}")
+                    continue
 
-        logger.info(f"Architecture: {self.num_cores} cores x {self.workers_per_core} workers = {self.num_cores * self.workers_per_core} total concurrent connections")
+                # Check if executor has capacity
+                if len(self.active_futures) >= self.max_workers:
+                    logger.debug(f"Max workers reached ({self.max_workers}), skipping: {game_id}")
+                    continue
 
-        # Use ThreadPoolExecutor with increased workers for multi-core simulation
-        # Each thread can run on different CPU cores due to GIL release during I/O
-        total_workers = self.num_cores * self.workers_per_core
-        logger.info(f"Using {total_workers} concurrent threads for {len(unique_games)} games")
-
-        # Process games in parallel
-        with ThreadPoolExecutor(max_workers=total_workers) as executor:
-            futures = {}
-            for game in unique_games:
-                game_id = f"{game.get('host_name', '')}_{game.get('client_name', '')}_{game.get('ip', '')}"
                 logger.info(f"Submitting game for capture: {game_id}")
-                future = executor.submit(
+                future = self.executor.submit(
                     process_single_game,
                     game,
                     self.output_dir,
                     self.capture_duration
                 )
-                futures[future] = game_id
+                future.add_done_callback(lambda f, gid=game_id: self._game_capture_callback(gid, f))
+                self.active_futures[game_id] = future
+                submitted_count += 1
 
-            if not futures:
-                logger.info("No new games to process")
-                return
+        logger.info(f"Submitted {submitted_count} new games, currently processing {len(self.active_futures)} total")
+        return submitted_count
 
-            logger.info(f"Waiting for {len(futures)} game capture tasks to complete...")
-            # Start a background thread to update the status display while waiting
+    def run_once(self):
+        """Run one capture cycle (legacy mode, waits for all to complete)"""
+        self.poll_and_submit_new_games()
+        # Wait for all active games to complete
+        while self.active_futures:
+            time.sleep(1.0)
+            print_status_display()
+
+    def run(self):
+        """Main service loop with continuous polling"""
+        self.running = True
+
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        print(f"=== Replay Service Started ===")
+        print(f"Output: {self.output_dir} | Poll: {self.poll_interval}s | Duration: {self.capture_duration}s | Workers: {self.max_workers} (2 cores x 15)")
+        print(f"Press Ctrl+C to stop")
+        print("")
+
+        # Create long-running executor
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            self.executor = executor
+
+            # Start display update thread
             display_running = threading.Event()
             display_running.set()
 
             def _update_display():
-                while display_running.is_set():
+                while display_running.is_set() and self.running:
                     print_status_display()
                     time.sleep(1.0)
 
             display_thread = threading.Thread(target=_update_display, daemon=True)
             display_thread.start()
 
-            # Wait for all to complete
-            completed = 0
-            for future in as_completed(futures):
-                game_id = futures[future]
-                completed += 1
+            cycle_count = 0
+            last_poll_time = 0
+
+            while self.running:
                 try:
-                    result = future.result()
-                    logger.info(f"Game {completed}/{len(futures)} completed: {game_id} -> {result}")
+                    current_time = time.time()
+
+                    # Poll for new games every poll_interval seconds
+                    if current_time - last_poll_time >= self.poll_interval:
+                        cycle_count += 1
+                        logger.info(f"=== Starting poll cycle #{cycle_count} ===")
+                        self.poll_and_submit_new_games()
+                        last_poll_time = current_time
+
+                    # Small sleep to prevent busy loop
+                    time.sleep(0.5)
+
+                except KeyboardInterrupt:
+                    logger.info("KeyboardInterrupt received, stopping...")
+                    break
                 except Exception as e:
-                    log_error(f"Error processing game {game_id}", e, {"game_id": game_id})
-                    stats.update(errors=stats.errors + 1)
-
-            display_running.clear()
-            display_thread.join(timeout=2.0)
-            print_status_display()
-            logger.info(f"All {len(futures)} games processed")
-
-    def run(self):
-        """Main service loop"""
-        self.running = True
-
-        os.makedirs(self.output_dir, exist_ok=True)
-
-        print(f"=== Replay Service Started ===")
-        print(f"Output: {self.output_dir} | Poll: {self.poll_interval}s | Duration: {self.capture_duration}s")
-        print(f"Architecture: {self.num_cores} cores x {self.workers_per_core} workers = {self.num_cores * self.workers_per_core} total workers")
-        print(f"Press Ctrl+C to stop")
-        print("")
-
-        cycle_count = 0
-        while self.running:
-            try:
-                cycle_count += 1
-                logger.info(f"=== Starting poll cycle #{cycle_count} ===")
-                self.run_once()
-
-                # Wait before next poll with status updates
-                logger.info(f"Poll cycle #{cycle_count} complete. Waiting {self.poll_interval}s before next poll...")
-                for i in range(int(self.poll_interval)):
-                    if not self.running:
-                        break
-                    print_status_display()
+                    log_error("Error in main service loop", e, {"cycle_count": cycle_count})
                     time.sleep(1)
 
-            except KeyboardInterrupt:
-                logger.info("KeyboardInterrupt received, stopping...")
-                break
-            except Exception as e:
-                log_error("Error in main service loop", e, {"cycle_count": cycle_count})
-                pass
+            # Cleanup
+            display_running.clear()
+            display_thread.join(timeout=2.0)
+            self.running = False
 
-        self.running = False
         print(f"\n=== Service Stopped ===")
         print_status_display()
         print("")
@@ -1812,29 +1817,21 @@ class ReplayService:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Touhou 12.3 Replay Recording Service (Multi-Process)")
+    parser = argparse.ArgumentParser(description="Touhou 12.3 Replay Recording Service (Parallel)")
     parser.add_argument("--output", "-o", default=DEFAULT_OUTPUT_DIR, help="Output directory for replays")
     parser.add_argument("--poll", "-p", type=float, default=30.0, help="Poll interval in seconds")
     parser.add_argument("--duration", "-d", type=float, default=0.0,
                         help="Capture duration in seconds per game. Use 0 to wait until match end (default)")
-    parser.add_argument("--workers", "-w", type=int, default=10, help="Max concurrent connections (legacy, use --cores and --workers-per-core)")
-    parser.add_argument("--cores", "-c", type=int, default=1, help="Number of CPU cores to use (default: 1)")
-    parser.add_argument("--workers-per-core", "-W", type=int, default=15, help="Number of workers per core (default: 15)")
+    parser.add_argument("--workers", "-w", type=int, default=30, help="Max concurrent connections (default: 30 = 2 cores x 15 workers)")
     parser.add_argument("--once", "-1", action="store_true", help="Run once instead of continuously")
 
     args = parser.parse_args()
-
-    # Use new multi-process parameters if specified, otherwise fall back to legacy
-    num_cores = args.cores if args.cores > 1 else 1
-    workers_per_core = args.workers_per_core
 
     service = ReplayService(
         output_dir=args.output,
         poll_interval=args.poll,
         capture_duration=args.duration,
-        max_workers=args.workers,
-        num_cores=num_cores,
-        workers_per_core=workers_per_core
+        max_workers=args.workers
     )
 
     def signal_handler(sig, frame):
