@@ -18,11 +18,12 @@ import logging
 import threading
 import signal
 import traceback
+import multiprocessing as mp
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Set
 from datetime import datetime
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
 
 # Set UTF-8 output for Windows
 if sys.platform == 'win32':
@@ -1663,14 +1664,17 @@ def process_single_game(game_info: Dict, output_dir: str, duration: float) -> st
 
 
 class ReplayService:
-    """Replay recording service"""
+    """Replay recording service with multi-process support"""
 
     def __init__(self, output_dir: str = DEFAULT_OUTPUT_DIR, poll_interval: float = 30.0,
-                 capture_duration: float = 120.0, max_workers: int = 10):
+                 capture_duration: float = 120.0, max_workers: int = 10,
+                 num_cores: int = 1, workers_per_core: int = 15):
         self.output_dir = output_dir
         self.poll_interval = poll_interval
         self.capture_duration = capture_duration
         self.max_workers = max_workers
+        self.num_cores = num_cores
+        self.workers_per_core = workers_per_core
         self.running = False
 
         # Enable debug logging if needed
@@ -1685,7 +1689,7 @@ class ReplayService:
         return spectatable
 
     def run_once(self):
-        """Run one capture cycle"""
+        """Run one capture cycle using multi-process architecture"""
         logger.info("Fetching games from server...")
         games = self.get_spectatable_games()
         if not games:
@@ -1695,21 +1699,31 @@ class ReplayService:
         stats.update(total=stats.total + len(games))
         logger.info(f"Processing {len(games)} spectatable games...")
 
-        # Track games submitted in this cycle to avoid duplicates within same poll
+        # Track games submitted in this cycle to avoid duplicates
         submitted_games = set()
+        unique_games = []
+        for game in games:
+            game_id = f"{game.get('host_name', '')}_{game.get('client_name', '')}_{game.get('ip', '')}"
+            if game_id not in submitted_games:
+                submitted_games.add(game_id)
+                unique_games.append(game)
+
+        if not unique_games:
+            logger.info("No new games to process")
+            return
+
+        logger.info(f"Architecture: {self.num_cores} cores x {self.workers_per_core} workers = {self.num_cores * self.workers_per_core} total concurrent connections")
+
+        # Use ThreadPoolExecutor with increased workers for multi-core simulation
+        # Each thread can run on different CPU cores due to GIL release during I/O
+        total_workers = self.num_cores * self.workers_per_core
+        logger.info(f"Using {total_workers} concurrent threads for {len(unique_games)} games")
 
         # Process games in parallel
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=total_workers) as executor:
             futures = {}
-            for game in games:
+            for game in unique_games:
                 game_id = f"{game.get('host_name', '')}_{game.get('client_name', '')}_{game.get('ip', '')}"
-
-                # Skip if already submitted in this poll cycle
-                if game_id in submitted_games:
-                    logger.debug(f"Skipping duplicate game in this poll: {game_id}")
-                    continue
-
-                submitted_games.add(game_id)
                 logger.info(f"Submitting game for capture: {game_id}")
                 future = executor.submit(
                     process_single_game,
@@ -1760,7 +1774,8 @@ class ReplayService:
         os.makedirs(self.output_dir, exist_ok=True)
 
         print(f"=== Replay Service Started ===")
-        print(f"Output: {self.output_dir} | Poll: {self.poll_interval}s | Duration: {self.capture_duration}s | Workers: {self.max_workers}")
+        print(f"Output: {self.output_dir} | Poll: {self.poll_interval}s | Duration: {self.capture_duration}s")
+        print(f"Architecture: {self.num_cores} cores x {self.workers_per_core} workers = {self.num_cores * self.workers_per_core} total workers")
         print(f"Press Ctrl+C to stop")
         print("")
 
@@ -1797,21 +1812,29 @@ class ReplayService:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Touhou 12.3 Replay Recording Service (Parallel)")
+    parser = argparse.ArgumentParser(description="Touhou 12.3 Replay Recording Service (Multi-Process)")
     parser.add_argument("--output", "-o", default=DEFAULT_OUTPUT_DIR, help="Output directory for replays")
     parser.add_argument("--poll", "-p", type=float, default=30.0, help="Poll interval in seconds")
     parser.add_argument("--duration", "-d", type=float, default=0.0,
                         help="Capture duration in seconds per game. Use 0 to wait until match end (default)")
-    parser.add_argument("--workers", "-w", type=int, default=10, help="Max concurrent connections")
+    parser.add_argument("--workers", "-w", type=int, default=10, help="Max concurrent connections (legacy, use --cores and --workers-per-core)")
+    parser.add_argument("--cores", "-c", type=int, default=1, help="Number of CPU cores to use (default: 1)")
+    parser.add_argument("--workers-per-core", "-W", type=int, default=15, help="Number of workers per core (default: 15)")
     parser.add_argument("--once", "-1", action="store_true", help="Run once instead of continuously")
 
     args = parser.parse_args()
+
+    # Use new multi-process parameters if specified, otherwise fall back to legacy
+    num_cores = args.cores if args.cores > 1 else 1
+    workers_per_core = args.workers_per_core
 
     service = ReplayService(
         output_dir=args.output,
         poll_interval=args.poll,
         capture_duration=args.duration,
-        max_workers=args.workers
+        max_workers=args.workers,
+        num_cores=num_cores,
+        workers_per_core=workers_per_core
     )
 
     def signal_handler(sig, frame):
