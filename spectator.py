@@ -175,6 +175,7 @@ class SpectatorClient:
         dump_stream: bool = False,
         dump_stream_file: Optional[str] = None,
         dump_max_hex_bytes: int = 96,
+        miss_multiplier: int = 10,
     ) -> ReplayData:
         self.running = True
         start_time = time.time()
@@ -216,6 +217,7 @@ class SpectatorClient:
         dump_fh = None
         last_missing_report_time = 0.0
         last_missing_report_max_frame = 0
+        miss_burst = max(1, int(miss_multiplier or 1))
 
         def _missing_frames_upto(frame_limit: int) -> List[int]:
             if frame_limit <= 0:
@@ -289,6 +291,7 @@ class SpectatorClient:
                     send_request_frame = _choose_request_frame(current_time)
                     replay_req = TouhouProtocol.create_spectate_replay_request(current_match_id, send_request_frame)
                     try:
+                        # 发送原有的周期性请求（保持主进度不变）
                         self.sock.send(replay_req)
                         _dump_packet("SEND", replay_req)
                         logger.debug(
@@ -307,6 +310,34 @@ class SpectatorClient:
                         logger.debug(f"Send error: {e}")
                         stop_reason = "send_error"
                         break
+
+                    # 额外发送定向缺帧请求（不改变主请求节奏）——只发送最早一个缺帧的请求
+                    try:
+                        current_max_frame = _max_captured_frame()
+                        missing = _missing_frames_upto(current_max_frame) if current_max_frame > 0 else []
+                    except Exception:
+                        missing = []
+
+                    if missing:
+                        # 对所有缺帧目标进行突发请求（每帧重复 miss_burst 次），不改变主请求节奏
+                        for target_frame in missing:
+                            try:
+                                target_raw = target_frame * 2
+                            except Exception:
+                                continue
+                            if target_raw == send_request_frame:
+                                continue
+                            for attempt in range(miss_burst):
+                                try:
+                                    miss_req = TouhouProtocol.create_spectate_replay_request(current_match_id, target_raw)
+                                    self.sock.send(miss_req)
+                                    _dump_packet("SEND-MISS", miss_req)
+                                    logger.debug(
+                                        f"[{self.ip_port}] SEND-MISS missing_frame={target_frame} raw_word={target_raw} match_id={current_match_id} attempt={attempt+1}/{miss_burst} raw={miss_req.hex()}"
+                                    )
+                                except Exception:
+                                    # 发包失败则忽略；下一次主循环会继续重试
+                                    pass
 
                 first_recv = True
                 while True:
