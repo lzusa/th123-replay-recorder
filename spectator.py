@@ -175,7 +175,7 @@ class SpectatorClient:
         dump_stream: bool = False,
         dump_stream_file: Optional[str] = None,
         dump_max_hex_bytes: int = 96,
-        miss_multiplier: int = 10,
+        miss_multiplier: int = 3,
     ) -> ReplayData:
         self.running = True
         start_time = time.time()
@@ -319,14 +319,13 @@ class SpectatorClient:
                         missing = []
 
                     if missing:
-                        # 对所有缺帧目标进行突发请求（每帧重复 miss_burst 次），不改变主请求节奏
-                        for target_frame in missing:
-                            try:
-                                target_raw = target_frame * 2
-                            except Exception:
-                                continue
-                            if target_raw == send_request_frame:
-                                continue
+                        # 回退：只对最早的一个缺帧目标突发请求（每帧重复 miss_burst 次），不改变主请求节奏
+                        target_frame = missing[0]
+                        try:
+                            target_raw = target_frame * 2
+                        except Exception:
+                            target_raw = None
+                        if target_raw is not None and target_raw != send_request_frame:
                             for attempt in range(miss_burst):
                                 try:
                                     miss_req = TouhouProtocol.create_spectate_replay_request(current_match_id, target_raw)
@@ -336,7 +335,7 @@ class SpectatorClient:
                                         f"[{self.ip_port}] SEND-MISS missing_frame={target_frame} raw_word={target_raw} match_id={current_match_id} attempt={attempt+1}/{miss_burst} raw={miss_req.hex()}"
                                     )
                                 except Exception:
-                                    # 发包失败则忽略；下一次主循环会继续重试
+                                    # 发包失败就忽略；下一次主循环会继续重试
                                     pass
 
                 first_recv = True
