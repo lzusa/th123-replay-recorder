@@ -177,11 +177,13 @@ class ReplayService:
         poll_interval: float = 30.0,
         capture_duration: float = 120.0,
         max_workers: int = 30,
+        only_cn: bool = False,
     ):
         self.output_dir = output_dir
         self.poll_interval = poll_interval
         self.capture_duration = capture_duration
         self.max_workers = max_workers
+        self.only_cn = bool(only_cn)
         self.running = False
         self.active_futures = {}
         self.executor = None
@@ -190,6 +192,15 @@ class ReplayService:
     def get_spectatable_games(self) -> List[Dict[str, Any]]:
         games = fetch_games()
         spectatable = [game for game in games if game.get("spectatable") and game.get("started")]
+        if self.only_cn:
+            filtered = []
+            for game in spectatable:
+                host_country = (game.get("host_country") or "").lower()
+                client_country = (game.get("client_country") or "").lower()
+                if host_country == "cn" and client_country == "cn":
+                    filtered.append(game)
+            logger.debug(f"Filtering spectatable games to only-cn: {len(filtered)} remain from {len(spectatable)}")
+            spectatable = filtered
         logger.debug(f"Found {len(spectatable)} spectatable games out of {len(games)} total")
         return spectatable
 
@@ -299,6 +310,7 @@ def run_main(args):
         poll_interval=args.poll,
         capture_duration=args.duration,
         max_workers=args.workers,
+        only_cn=bool(getattr(args, "only_cn", False)),
     )
 
     def signal_handler(_sig, _frame):

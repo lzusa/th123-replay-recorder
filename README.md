@@ -199,6 +199,7 @@ python replay_recorder.py --workers 5
 | `--duration` | `-d` | `0` | Capture duration (0 = until match end) |
 | `--workers` | `-w` | `10` | Max concurrent connections |
 | `--once` | `-1` | - | Run once and exit |
+| `--only-cn` | | - | Only spectate games where both players' country is 'cn' |
 
 ### Environment Variables
 
@@ -226,6 +227,9 @@ replays/
 4. **Handshake**: Sends INIT_REQUEST and receives INIT_SUCCESS
 5. **Recording**: 
    - Sends GAME_REPLAY_REQUEST every 3 frames (~50ms)
+    - When gaps are detected, the spectator will send targeted "missing frame" requests to backfill.
+        - By default the code will send a small burst of repeat requests for the earliest missing pair-frame to accelerate recovery (configurable via the `miss_multiplier` parameter passed to `capture_replay()`, default 10).
+        - This aggressive behavior is limited to a burst per main loop iteration to avoid indefinitely flooding the network; adjust `miss_multiplier` or disable the feature if you observe increased packet loss or latency.
    - Receives GAME_REPLAY packets with compressed input data
    - Decompresses zlib data and extracts frame inputs
 6. **Saving**: Writes captured data to `.rep` files in the official format

@@ -43,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max concurrent connections (default: 30 = 2 cores x 15 workers)",
     )
     parser.add_argument("--once", "-1", action="store_true", help="Run once instead of continuously")
+    parser.add_argument(
+        "--only-cn",
+        action="store_true",
+        help="Only spectate games where both players' country is 'cn'",
+    )
     return parser
 
 
