@@ -218,6 +218,14 @@ class SpectatorClient:
         last_missing_report_time = 0.0
         last_missing_report_max_frame = 0
         miss_burst = max(1, int(miss_multiplier or 1))
+        # 优化重发控制：每个缺帧上次发送时间，用于节流同一目标的重复请求
+        miss_last_sent: Dict[int, float] = {}
+        # 每轮最多对多少个缺帧目标发起突发请求
+        miss_targets_per_cycle = 3
+        # 每轮允许的最大 SEND-MISS 包数量（防止突发过大）
+        miss_max_per_cycle = 5
+        # 对同一缺帧的重试最短间隔（秒）
+        miss_retry_interval = 0.05
 
         def _missing_frames_upto(frame_limit: int) -> List[int]:
             if frame_limit <= 0:
@@ -319,14 +327,28 @@ class SpectatorClient:
                         missing = []
 
                     if missing:
-                        # 回退：只对最早的一个缺帧目标突发请求（每帧重复 miss_burst 次），不改变主请求节奏
-                        target_frame = missing[0]
-                        try:
-                            target_raw = target_frame * 2
-                        except Exception:
-                            target_raw = None
-                        if target_raw is not None and target_raw != send_request_frame:
+                        # 优化策略：按轮次对前 N 个缺帧目标发起突发请求，同时对每个目标做最小重试间隔节流，
+                        # 并限制每轮总发包数，避免本地/网络过载。
+                        sent_packets_this_cycle = 0
+                        now = time.time()
+                        targets = missing[:miss_targets_per_cycle]
+                        for target_frame in targets:
+                            if sent_packets_this_cycle >= miss_max_per_cycle:
+                                break
+                            last_sent = miss_last_sent.get(target_frame, 0.0)
+                            if now - last_sent < miss_retry_interval:
+                                continue
+                            try:
+                                target_raw = target_frame * 2
+                            except Exception:
+                                continue
+                            if target_raw == send_request_frame:
+                                # 主请求已覆盖，不重复发送
+                                continue
+                            # 发送对单个目标的突发重发
                             for attempt in range(miss_burst):
+                                if sent_packets_this_cycle >= miss_max_per_cycle:
+                                    break
                                 try:
                                     miss_req = TouhouProtocol.create_spectate_replay_request(current_match_id, target_raw)
                                     self.sock.send(miss_req)
@@ -334,9 +356,11 @@ class SpectatorClient:
                                     logger.debug(
                                         f"[{self.ip_port}] SEND-MISS missing_frame={target_frame} raw_word={target_raw} match_id={current_match_id} attempt={attempt+1}/{miss_burst} raw={miss_req.hex()}"
                                     )
+                                    sent_packets_this_cycle += 1
                                 except Exception:
-                                    # 发包失败就忽略；下一次主循环会继续重试
+                                    # 发包失败忽略，下一轮重试
                                     pass
+                            miss_last_sent[target_frame] = now
 
                 first_recv = True
                 while True:
@@ -410,13 +434,40 @@ class SpectatorClient:
                                 continue
                             replay_info = TouhouProtocol.parse_game_replay(game_data)
                             if replay_info:
+                                # 对可用性做更严格判断：如果既没有声明 inputs，也没有任何解包出的输入，且并非合理的结束标记或结束通告，视为坏包并忽略
                                 self.replay_data.debug_session_signals += 1
-                                self.replay_data.debug_replay_packets += 1
-                                has_readable_session_signal = True
-                                has_seen_replay_packet = True
-                                last_replay_packet_time = current_time
                                 raw_frame_id = int(replay_info.get("frame_id", 0))
                                 raw_game_inputs_count = int(replay_info.get("game_inputs_count", 0))
+                                replay_inputs_count = int(replay_info.get("replay_inputs_count", 0) or 0)
+
+                                is_empty_replay_marker = (
+                                    replay_info.get("frame_id", 0) == 0
+                                    and replay_info.get("end_frame_id", 0) == 0
+                                    and replay_info.get("match_id", 0) == 0
+                                    and replay_info.get("game_inputs_count", 0) == 0
+                                    and not replay_info.get("inputs")
+                                )
+
+                                # 如果没有任何输入且也不是合法的空结束标记，也没有声明 end_frame_id（即很可能是问题包），则忽略
+                                if replay_inputs_count == 0 and raw_game_inputs_count == 0 and not is_empty_replay_marker and not (replay_info.get("end_frame_id", 0) > 0):
+                                    self.replay_data.debug_replay_bad_packets = getattr(self.replay_data, "debug_replay_bad_packets", 0) + 1
+                                    logger.debug(f"[{self.ip_port}] Ignoring bad/empty GAME_REPLAY packet: raw_frame={raw_frame_id} end={replay_info.get('end_frame_id',0)}")
+                                    continue
+
+                                # 如果声明数量与实际解析数量不一致，视为坏包并忽略（除非是合法的空结束标记）
+                                if raw_game_inputs_count != replay_inputs_count and not is_empty_replay_marker:
+                                    self.replay_data.debug_replay_bad_packets = getattr(self.replay_data, "debug_replay_bad_packets", 0) + 1
+                                    logger.debug(
+                                        f"[{self.ip_port}] GAME_REPLAY declared/parity mismatch -> treat as bad: declared={raw_game_inputs_count}, parsed={replay_inputs_count}, raw_frame={raw_frame_id}"
+                                    )
+                                    continue
+
+                                # 标记为收到可用的 replay 包（空结束标记不计为数据进展）
+                                self.replay_data.debug_replay_packets += 1
+                                has_readable_session_signal = True
+                                if replay_inputs_count > 0:
+                                    has_seen_replay_packet = True
+                                last_replay_packet_time = current_time
                                 raw_first_word = raw_frame_id - raw_game_inputs_count + 1 if raw_game_inputs_count > 0 else raw_frame_id
                                 latest_replay_word_count = raw_game_inputs_count
                                 latest_replay_first_word = raw_first_word

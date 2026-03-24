@@ -119,6 +119,7 @@ class ReplayData:
     debug_replay_packets: int = 0
     debug_match_parse_failures: int = 0
     debug_replay_parse_failures: int = 0
+    debug_replay_bad_packets: int = 0
     debug_last_replay_frame: int = 0
     debug_last_requested_frame: int = 0
     debug_last_match_id: int = 0
