@@ -176,6 +176,7 @@ class SpectatorClient:
         dump_stream_file: Optional[str] = None,
         dump_max_hex_bytes: int = 96,
         miss_multiplier: int = 3,
+        strict_replay_validation: bool = True,
     ) -> ReplayData:
         self.running = True
         start_time = time.time()
@@ -339,7 +340,8 @@ class SpectatorClient:
                             if now - last_sent < miss_retry_interval:
                                 continue
                             try:
-                                target_raw = target_frame * 2
+                                # protocol: raw frame id corresponds to individual input frame; pair-index p -> newest raw frame of that pair is 2*p-1
+                                target_raw = target_frame * 2 - 1
                             except Exception:
                                 continue
                             if target_raw == send_request_frame:
@@ -438,6 +440,8 @@ class SpectatorClient:
                                 self.replay_data.debug_session_signals += 1
                                 raw_frame_id = int(replay_info.get("frame_id", 0))
                                 raw_game_inputs_count = int(replay_info.get("game_inputs_count", 0))
+                                # game_inputs_count is number of single 2-byte inputs; pairs = game_inputs_count // 2
+                                expected_pairs = int(raw_game_inputs_count) // 2
                                 replay_inputs_count = int(replay_info.get("replay_inputs_count", 0) or 0)
 
                                 is_empty_replay_marker = (
@@ -449,18 +453,33 @@ class SpectatorClient:
                                 )
 
                                 # 如果没有任何输入且也不是合法的空结束标记，也没有声明 end_frame_id（即很可能是问题包），则忽略
-                                if replay_inputs_count == 0 and raw_game_inputs_count == 0 and not is_empty_replay_marker and not (replay_info.get("end_frame_id", 0) > 0):
+                                if replay_inputs_count == 0 and expected_pairs == 0 and not is_empty_replay_marker and not (replay_info.get("end_frame_id", 0) > 0):
                                     self.replay_data.debug_replay_bad_packets = getattr(self.replay_data, "debug_replay_bad_packets", 0) + 1
                                     logger.debug(f"[{self.ip_port}] Ignoring bad/empty GAME_REPLAY packet: raw_frame={raw_frame_id} end={replay_info.get('end_frame_id',0)}")
                                     continue
 
-                                # 如果声明数量与实际解析数量不一致，视为坏包并忽略（除非是合法的空结束标记）
-                                if raw_game_inputs_count != replay_inputs_count and not is_empty_replay_marker:
+                                # 如果声明数量大于 0 但解析出 0 个输入，视为坏包并忽略（除非是合法的空结束标记）
+                                if expected_pairs > 0 and replay_inputs_count == 0 and not is_empty_replay_marker:
                                     self.replay_data.debug_replay_bad_packets = getattr(self.replay_data, "debug_replay_bad_packets", 0) + 1
                                     logger.debug(
-                                        f"[{self.ip_port}] GAME_REPLAY declared/parity mismatch -> treat as bad: declared={raw_game_inputs_count}, parsed={replay_inputs_count}, raw_frame={raw_frame_id}"
+                                        f"[{self.ip_port}] Declared game_inputs_count={raw_game_inputs_count} (pairs={expected_pairs}) but parsed 0 pairs — ignoring packet: raw_frame={raw_frame_id}"
                                     )
                                     continue
+
+                                # 如果声明数量与解析数量不一致，处理取决于 strict_replay_validation
+                                if expected_pairs != replay_inputs_count:
+                                    # 严格模式：声明与解析不一致视为坏包并忽略
+                                    if strict_replay_validation:
+                                        self.replay_data.debug_replay_bad_packets = getattr(self.replay_data, "debug_replay_bad_packets", 0) + 1
+                                        logger.debug(
+                                            f"[{self.ip_port}] GAME_REPLAY count mismatch (strict): declared_pairs={expected_pairs}, parsed_pairs={replay_inputs_count}; ignoring packet"
+                                        )
+                                        continue
+                                    # 宽松模式：若解析出了一些输入则接受解析出的数据并记录调试信息
+                                    if replay_inputs_count > 0:
+                                        logger.debug(
+                                            f"[{self.ip_port}] GAME_REPLAY count mismatch: declared_pairs={expected_pairs}, parsed_pairs={replay_inputs_count}; proceeding with parsed"
+                                        )
 
                                 # 标记为收到可用的 replay 包（空结束标记不计为数据进展）
                                 self.replay_data.debug_replay_packets += 1

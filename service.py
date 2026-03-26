@@ -126,6 +126,8 @@ def process_single_game(game_info: Dict[str, Any], output_dir: str, duration: fl
                 stop_when_never_readable=True,
                 never_readable_timeout=20.0,
                 stop_on_empty_replay_marker=False,
+                # 启用严格模式：声明数量与解析数量不一致视为坏包
+                strict_replay_validation=True,
             )
 
             if replay.frames:
